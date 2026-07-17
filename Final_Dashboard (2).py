@@ -155,7 +155,7 @@ hr { border: none !important; border-top: 1px solid #e5e9f0 !important; margin: 
 # ═══════════════════════════════════════════════════════════════
 st.markdown("""
 <div class="page-hero">
-    <h1>📊 MSME Project Completion Dashboard</h1>
+    <h1>MSME Project Completion Dashboard</h1>
     <p>DOST SETUP 4.0 iFund Program — Western Visayas | Model-driven risk assessment (live data)</p>
 </div>
 """, unsafe_allow_html=True)
@@ -806,7 +806,7 @@ using_demo_data = False
 if fetch_error == "not_configured":
     st.markdown("""
     <div class="info-banner">
-        Supabase isn't configured yet (missing <code>SUPABASE_URL</code> /
+        ⚠️ Supabase isn't configured yet (missing <code>SUPABASE_URL</code> /
         <code>SUPABASE_KEY</code> in secrets), so <strong>demo data</strong> is shown below.
         Connect Supabase to see live endorsed MSME records.
     </div>
@@ -837,7 +837,7 @@ endorsed_df = run_predictions_on_dataframe(mapped_df)
 # FILTERS + SEARCH
 # ═══════════════════════════════════════════════════════════════
 ALL_LABEL = "All"
-st.markdown('<div class="section-pill"> Filters</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-pill">🔍 Filters</div>', unsafe_allow_html=True)
 f1, f2, f3, f4 = st.columns([1, 1, 1, 1.2])
 with f1:
     province_options = [ALL_LABEL] + sorted(endorsed_df["Province"].dropna().unique().tolist())
@@ -882,7 +882,7 @@ high_priority = (filtered_df["Risk Tier"] == "High").sum()
 moderate_priority = (filtered_df["Risk Tier"] == "Medium").sum()
 low_priority = (filtered_df["Risk Tier"] == "Low").sum()
 
-st.markdown('<div class="section-pill"> Portfolio Snapshot</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-pill">Portfolio Snapshot</div>', unsafe_allow_html=True)
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
     st.markdown(f"""<div class="metric-card blue">
@@ -914,7 +914,7 @@ with k5:
 if missing_id_count:
     st.markdown(f"""
     <div class="info-banner">
-         {missing_id_count} record(s) in the current view have no ID in Supabase.
+        {missing_id_count} record(s) in the current view have no ID in Supabase.
         They're shown with a "Missing ID" placeholder in the table below —
         this is a data-quality issue in the source table, not a dashboard error.
     </div>
@@ -925,7 +925,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ═══════════════════════════════════════════════════════════════
 # ENDORSED MSME TABLE
 # ═══════════════════════════════════════════════════════════════
-st.markdown('<div class="section-title"> Endorsed MSMEs — Completion Probability</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Endorsed MSMEs — Completion Probability</div>', unsafe_allow_html=True)
 st.caption(
     "Sorted by Completion Probability (ascending) so the highest-priority cases appear first. "
     "High Monitoring Priority (probability < 40%) indicates profiles similar to historically "
@@ -936,7 +936,7 @@ if filtered_df.empty:
     st.info("No endorsed MSMEs match the current filters.")
 else:
     display_df = filtered_df.copy()
-    display_df["ID"] = display_df["ID"].apply(lambda x: x if pd.notna(x) else " Missing ID")
+    display_df["ID"] = display_df["ID"].apply(lambda x: x if pd.notna(x) else "Missing ID")
     display_df["Completion Probability"] = display_df["Completion Probability"].apply(
         lambda x: f"{x*100:.1f}%" if pd.notna(x) else "—"
     )
@@ -951,7 +951,7 @@ else:
     table_cols = [
         "ID", "Beneficiary", "Province", "Sector", "Type of Ownership",
         "Size of Enterprise", "Project Cost", "Has Prior Funding",
-        "Completion Probability", "Predicted Class", "Monitoring Priority", "Status",
+        "Completion Probability", "Predicted Class", "Monitoring Priority",
     ]
     table_cols = [c for c in table_cols if c in display_df.columns]
     st.dataframe(display_df[table_cols], use_container_width=True, hide_index=True)
@@ -969,7 +969,7 @@ else:
     exp1, exp2 = st.columns([1, 1])
     with exp1:
         st.download_button(
-            "Export CSV",
+            "⬇️ Export CSV",
             data=export_df.to_csv(index=False).encode("utf-8"),
             file_name="endorsed_msmes_filtered.csv",
             mime="text/csv",
@@ -982,7 +982,7 @@ else:
             with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
                 export_df.to_excel(writer, index=False, sheet_name="Endorsed MSMEs")
             st.download_button(
-                "Export Excel",
+                "⬇️ Export Excel",
                 data=xlsx_buffer.getvalue(),
                 file_name="endorsed_msmes_filtered.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1043,7 +1043,7 @@ else:
             </div>""", unsafe_allow_html=True)
 
             if row["_prediction_warnings"]:
-                st.warning(f"{row['_prediction_warnings']}")
+                st.warning(f" {row['_prediction_warnings']}")
 
             rec = get_detailed_recommendation(prob, tier_code, row)
             box = st.success if tier_code == "Low" else (st.warning if tier_code == "Medium" else st.error)
@@ -1055,14 +1055,13 @@ else:
         st.markdown("**Profile**")
         profile_data = {
             "Field": ["ID", "Beneficiary", "Province", "Sector", "Type of Ownership",
-                      "Size of Enterprise", "Project Cost", "Has Prior Funding", "Status"],
+                      "Size of Enterprise", "Project Cost", "Has Prior Funding"],
             "Value": [
                 row["ID"] if pd.notna(row["ID"]) else "Missing ID",
                 row.get("Beneficiary"), row.get("Province"), row.get("Sector"),
                 row.get("Type of Ownership"), row.get("Size of Enterprise"),
                 f"₱{row['Project Cost']:,.0f}" if pd.notna(row.get("Project Cost")) else "—",
                 "Yes" if row.get("Has_Prior_Funding") is True else ("No" if row.get("Has_Prior_Funding") is False else "—"),
-                row.get("Status"),
             ]
         }
         st.dataframe(pd.DataFrame(profile_data), hide_index=True, use_container_width=True)
