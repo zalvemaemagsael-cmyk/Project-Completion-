@@ -155,7 +155,7 @@ hr { border: none !important; border-top: 1px solid #e5e9f0 !important; margin: 
 # ═══════════════════════════════════════════════════════════════
 st.markdown("""
 <div class="page-hero">
-    <h1> MSME Project Completion Dashboard</h1>
+    <h1>📊 MSME Project Completion Dashboard</h1>
     <p>DOST SETUP 4.0 iFund Program — Western Visayas | Model-driven risk assessment (live data)</p>
 </div>
 """, unsafe_allow_html=True)
@@ -526,6 +526,44 @@ COLUMN_ALIASES = {
     "Year": ["year", "year_endorsed", "date_endorsed"],
 }
 
+# ── Centralized status mapping ───────────────────────────────────
+# Single source of truth for normalizing every status spelling/casing
+# Supabase might contain into one of a small set of canonical statuses.
+# Add new raw variants here — nowhere else in the code should hardcode
+# a status string comparison.
+STATUS_MAP = {
+    "applicant": "Applicant",
+    "applied": "Applicant",
+    "pending": "Applicant",
+    "endorsed": "Endorsed",
+    "approved": "Approved",
+    "completed": "Completed",
+    "rejected": "Rejected",
+}
+
+
+def map_status(raw_status):
+    """Normalize any raw status value to a canonical label via STATUS_MAP.
+    Unrecognized non-empty values are title-cased and passed through
+    (rather than silently dropped) so new statuses are visible instead
+    of hidden. Missing/blank values become 'Unknown'."""
+    text = _clean_text(raw_status)
+    if text is None:
+        return "Unknown"
+    return STATUS_MAP.get(text.lower(), text.title())
+
+
+# ── Monitoring-priority labels ────────────────────────────────────
+# risk_tier() (defined above) still returns the short internal codes
+# ("Low" / "Medium" / "High") used for badge CSS classes and comparisons.
+# These are the decision-support-oriented labels shown to users.
+RISK_LABELS = {
+    "Low": "Low Monitoring Priority",
+    "Medium": "Moderate Monitoring Priority",
+    "High": "High Monitoring Priority",
+}
+RISK_LABELS_REVERSE = {v: k for k, v in RISK_LABELS.items()}
+
 
 @st.cache_resource
 def get_supabase_client():
@@ -637,22 +675,95 @@ def run_predictions_on_dataframe(mapped_df: pd.DataFrame):
 
     enriched = pd.DataFrame(records)
 
-    # Ensure display-friendly defaults
+    # ── IDs: use the REAL Supabase ID. Never generate a placeholder. ──
     if "ID" not in enriched.columns:
-        enriched["ID"] = [f"MSME-{i+1:03d}" for i in range(len(enriched))]
+        enriched["ID"] = None
+    enriched["ID"] = enriched["ID"].apply(lambda x: _clean_text(x))
+    enriched["_missing_id"] = enriched["ID"].isna()
+
     if "Beneficiary" not in enriched.columns:
-        enriched["Beneficiary"] = enriched["ID"]
+        enriched["Beneficiary"] = None
+    enriched["Beneficiary"] = enriched["Beneficiary"].apply(
+        lambda x: _clean_text(x) if _clean_text(x) is not None else "Unknown Beneficiary"
+    )
+
+    # ── Status: single centralized mapping (see STATUS_MAP / map_status) ──
     if "Status" not in enriched.columns:
-        enriched["Status"] = "Approved"
+        enriched["Status"] = "Unknown"
     else:
-        enriched["Status"] = (
-            enriched["Status"].astype(str).str.strip().str.title()
-            .replace({"Applicant": "Applying", "Applied": "Applying", "Pending": "Applying"})
-        )
+        enriched["Status"] = enriched["Status"].apply(map_status)
+
     return enriched
 
 
+def get_detailed_recommendation(prob: float, tier: str, row) -> dict:
+    """
+    Build a richer, more personalized interpretation for the MSME Deep Dive:
+    a headline interpretation sentence plus a short list of concrete
+    recommended actions, informed by both the completion probability band
+    and a few relevant profile attributes. Purely descriptive/rule-based —
+    does not touch the model.
+    """
+    if prob >= 0.80:
+        headline = (
+            f"Very strong completion outlook ({prob*100:.1f}%). This profile closely "
+            "resembles projects that historically finished as planned."
+        )
+        actions = [
+            "Standard monitoring cadence is sufficient.",
+            "Good candidate for referral/case-study or peer mentoring programs.",
+        ]
+    elif prob >= 0.60:
+        headline = (
+            f"Strong completion outlook ({prob*100:.1f}%). Historical patterns suggest "
+            "a good likelihood of on-time completion."
+        )
+        actions = [
+            "Standard monitoring cadence is sufficient.",
+            "Light-touch check-ins at key project milestones.",
+        ]
+    elif prob >= 0.40:
+        headline = (
+            f"Borderline completion outlook ({prob*100:.1f}%). The profile sits close "
+            "to the model's decision boundary, so small changes in circumstances "
+            "could shift the outcome either way."
+        )
+        actions = [
+            "Schedule a mid-project check-in in addition to standard monitoring.",
+            "Confirm the project has a clear disbursement/milestone schedule.",
+        ]
+    elif prob >= 0.20:
+        headline = (
+            f"Elevated risk ({prob*100:.1f}%). This profile resembles projects that "
+            "historically struggled to complete."
+        )
+        actions = [
+            "Increase monitoring frequency (e.g. monthly instead of quarterly).",
+            "Offer additional technical assistance or business advisory support.",
+            "Flag for early intervention if milestones start slipping.",
+        ]
+    else:
+        headline = (
+            f"Critical risk ({prob*100:.1f}%). This profile closely resembles "
+            "historically non-completing projects."
+        )
+        actions = [
+            "Prioritize for immediate, intensive monitoring and case management.",
+            "Review funding conditions/disbursement schedule before further release.",
+            "Consider pairing with a mentor MSME or industry association support.",
+        ]
+
+    # Profile-informed additions (kept short — these are hints, not new facts).
+    if row.get("Has_Prior_Funding") is False:
+        actions.append("No prior funding history on record — consider financial literacy support.")
+    if row.get("Size of Enterprise") == "micro" and prob < 0.60:
+        actions.append("Micro-enterprises often benefit from simplified reporting/compliance support.")
+
+    return {"headline": headline, "actions": actions}
+
+
 def get_recommendation(tier: str) -> str:
+    """Kept for any lightweight callers that just need one sentence."""
     if tier == "Low":
         return "Profile aligns with historically completed projects. Standard monitoring is sufficient."
     if tier == "Medium":
@@ -670,7 +781,7 @@ def generate_sample_data(n=25):
     sectors = VALID_CATEGORIES["Sector"]
     ownership = VALID_CATEGORIES["Type of Ownership"]
     sizes = VALID_CATEGORIES["Size of Enterprise"]
-    statuses = ["Approved", "Applying"]
+    statuses = ["Approved", "Applicant", "Endorsed", "Completed", "Rejected"]
 
     rows = []
     for i in range(1, n + 1):
@@ -695,7 +806,7 @@ using_demo_data = False
 if fetch_error == "not_configured":
     st.markdown("""
     <div class="info-banner">
-         Supabase isn't configured yet (missing <code>SUPABASE_URL</code> /
+        Supabase isn't configured yet (missing <code>SUPABASE_URL</code> /
         <code>SUPABASE_KEY</code> in secrets), so <strong>demo data</strong> is shown below.
         Connect Supabase to see live endorsed MSME records.
     </div>
@@ -723,11 +834,11 @@ else:
 endorsed_df = run_predictions_on_dataframe(mapped_df)
 
 # ═══════════════════════════════════════════════════════════════
-# FILTERS
+# FILTERS + SEARCH
 # ═══════════════════════════════════════════════════════════════
 ALL_LABEL = "All"
 st.markdown('<div class="section-pill"> Filters</div>', unsafe_allow_html=True)
-f1, f2, f3 = st.columns(3)
+f1, f2, f3, f4 = st.columns([1, 1, 1, 1.2])
 with f1:
     province_options = [ALL_LABEL] + sorted(endorsed_df["Province"].dropna().unique().tolist())
     sel_province = st.selectbox("Province", province_options, index=0)
@@ -735,8 +846,10 @@ with f2:
     sector_options = [ALL_LABEL] + sorted(endorsed_df["Sector"].dropna().unique().tolist())
     sel_sector = st.selectbox("Sector", sector_options, index=0)
 with f3:
-    tier_options = [ALL_LABEL, "Low", "Medium", "High"]
-    sel_tier = st.selectbox("Risk Tier", tier_options, index=0)
+    tier_display_options = [ALL_LABEL] + list(RISK_LABELS.values())
+    sel_tier_display = st.selectbox("Monitoring Priority", tier_display_options, index=0)
+with f4:
+    search_text = st.text_input("Search Beneficiary", placeholder="Type a name…")
 
 st.markdown("---")
 
@@ -745,51 +858,67 @@ if sel_province != ALL_LABEL:
     filtered_df = filtered_df[filtered_df["Province"] == sel_province]
 if sel_sector != ALL_LABEL:
     filtered_df = filtered_df[filtered_df["Sector"] == sel_sector]
-if sel_tier != ALL_LABEL:
-    filtered_df = filtered_df[filtered_df["Risk Tier"] == sel_tier]
+if sel_tier_display != ALL_LABEL:
+    sel_tier_code = RISK_LABELS_REVERSE[sel_tier_display]
+    filtered_df = filtered_df[filtered_df["Risk Tier"] == sel_tier_code]
+if search_text.strip():
+    filtered_df = filtered_df[
+        filtered_df["Beneficiary"].str.contains(search_text.strip(), case=False, na=False)
+    ]
 
-approved_mask = filtered_df["Status"] == "Approved"
-applying_mask = filtered_df["Status"] == "Applying"
-approved_view = filtered_df[approved_mask]
-applying_view = filtered_df[applying_mask]
+# Default sort: ascending Completion Probability, so the highest-priority
+# (lowest-probability) cases surface first. Unscored records (NaN) sort last.
+filtered_df = filtered_df.sort_values("Completion Probability", ascending=True, na_position="last")
 
-total_approved = len(approved_view)
-total_applying = len(applying_view)
-high_risk_appr = (approved_view["Risk Tier"] == "High").sum()
-low_risk_appr = (approved_view["Risk Tier"] == "Low").sum()
-avg_prob_appr = approved_view["Completion Probability"].mean() if total_approved else 0
+missing_id_count = int(filtered_df["_missing_id"].sum())
 
 # ═══════════════════════════════════════════════════════════════
-# KPI CARDS
+# KPI CARDS — decision-support focused
 # ═══════════════════════════════════════════════════════════════
+total_endorsed = len(filtered_df)
+scored = filtered_df["Completion Probability"].dropna()
+avg_completion_prob = scored.mean() if len(scored) else 0
+high_priority = (filtered_df["Risk Tier"] == "High").sum()
+moderate_priority = (filtered_df["Risk Tier"] == "Medium").sum()
+low_priority = (filtered_df["Risk Tier"] == "Low").sum()
+
 st.markdown('<div class="section-pill"> Portfolio Snapshot</div>', unsafe_allow_html=True)
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
     st.markdown(f"""<div class="metric-card blue">
-        <div class="metric-label">Approved MSMEs</div>
-        <div class="metric-value">{total_approved}</div>
+        <div class="metric-label">Total Endorsed MSMEs</div>
+        <div class="metric-value">{total_endorsed}</div>
     </div>""", unsafe_allow_html=True)
 with k2:
     st.markdown(f"""<div class="metric-card blue">
-        <div class="metric-label">Applying MSMEs</div>
-        <div class="metric-value">{total_applying}</div>
+        <div class="metric-label">Avg Completion Probability</div>
+        <div class="metric-value">{avg_completion_prob*100:.1f}%</div>
     </div>""", unsafe_allow_html=True)
 with k3:
     st.markdown(f"""<div class="metric-card red">
-        <div class="metric-label">High-Risk (Approved)</div>
-        <div class="metric-value">{high_risk_appr}</div>
-        <div class="metric-sub">Needs follow-up</div>
+        <div class="metric-label">High Monitoring Priority</div>
+        <div class="metric-value">{high_priority}</div>
+        <div class="metric-sub">Needs close follow-up</div>
     </div>""", unsafe_allow_html=True)
 with k4:
-    st.markdown(f"""<div class="metric-card green">
-        <div class="metric-label">Low-Risk (Approved)</div>
-        <div class="metric-value">{low_risk_appr}</div>
+    st.markdown(f"""<div class="metric-card yellow">
+        <div class="metric-label">Moderate Monitoring Priority</div>
+        <div class="metric-value">{moderate_priority}</div>
     </div>""", unsafe_allow_html=True)
 with k5:
-    st.markdown(f"""<div class="metric-card blue">
-        <div class="metric-label">Avg Completion Prob. (Approved)</div>
-        <div class="metric-value">{avg_prob_appr*100:.1f}%</div>
+    st.markdown(f"""<div class="metric-card green">
+        <div class="metric-label">Low Monitoring Priority</div>
+        <div class="metric-value">{low_priority}</div>
     </div>""", unsafe_allow_html=True)
+
+if missing_id_count:
+    st.markdown(f"""
+    <div class="info-banner">
+         {missing_id_count} record(s) in the current view have no ID in Supabase.
+        They're shown with a "Missing ID" placeholder in the table below —
+        this is a data-quality issue in the source table, not a dashboard error.
+    </div>
+    """, unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -798,14 +927,16 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ═══════════════════════════════════════════════════════════════
 st.markdown('<div class="section-title"> Endorsed MSMEs — Completion Probability</div>', unsafe_allow_html=True)
 st.caption(
-    "Completion probability is estimated from each project's profile using the trained model. "
-    "High risk (probability < 40%) indicates profiles similar to historically non-completing projects."
+    "Sorted by Completion Probability (ascending) so the highest-priority cases appear first. "
+    "High Monitoring Priority (probability < 40%) indicates profiles similar to historically "
+    "non-completing projects."
 )
 
 if filtered_df.empty:
     st.info("No endorsed MSMEs match the current filters.")
 else:
     display_df = filtered_df.copy()
+    display_df["ID"] = display_df["ID"].apply(lambda x: x if pd.notna(x) else " Missing ID")
     display_df["Completion Probability"] = display_df["Completion Probability"].apply(
         lambda x: f"{x*100:.1f}%" if pd.notna(x) else "—"
     )
@@ -815,11 +946,12 @@ else:
     display_df["Has Prior Funding"] = display_df["Has_Prior_Funding"].apply(
         lambda x: "Yes" if x is True else ("No" if x is False else "—")
     )
+    display_df["Monitoring Priority"] = display_df["Risk Tier"].map(RISK_LABELS).fillna("—")
 
     table_cols = [
         "ID", "Beneficiary", "Province", "Sector", "Type of Ownership",
         "Size of Enterprise", "Project Cost", "Has Prior Funding",
-        "Completion Probability", "Predicted Class", "Risk Tier",
+        "Completion Probability", "Predicted Class", "Monitoring Priority", "Status",
     ]
     table_cols = [c for c in table_cols if c in display_df.columns]
     st.dataframe(display_df[table_cols], use_container_width=True, hide_index=True)
@@ -832,28 +964,69 @@ else:
             "Check the source records in Supabase."
         )
 
+    # ── Export filtered table ────────────────────────────────────
+    export_df = display_df[table_cols]
+    exp1, exp2 = st.columns([1, 1])
+    with exp1:
+        st.download_button(
+            "Export CSV",
+            data=export_df.to_csv(index=False).encode("utf-8"),
+            file_name="endorsed_msmes_filtered.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with exp2:
+        try:
+            import io
+            xlsx_buffer = io.BytesIO()
+            with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
+                export_df.to_excel(writer, index=False, sheet_name="Endorsed MSMEs")
+            st.download_button(
+                "Export Excel",
+                data=xlsx_buffer.getvalue(),
+                file_name="endorsed_msmes_filtered.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        except ImportError:
+            st.caption("Install `openpyxl` (add to requirements.txt) to enable Excel export.")
+
     st.markdown("---")
 
     # ═══════════════════════════════════════════════════════════════
     # MSME DEEP DIVE
     # ═══════════════════════════════════════════════════════════════
-    st.markdown('<div class="section-title"> MSME Deep Dive</div>', unsafe_allow_html=True)
-    selected_id = st.selectbox(
+    st.markdown('<div class="section-title">MSME Deep Dive</div>', unsafe_allow_html=True)
+
+    # Select by dataframe index (robust even when some IDs are missing/blank),
+    # but LABEL each option with the real ID (or a clear warning) + beneficiary.
+    def _option_label(idx):
+        r = filtered_df.loc[idx]
+        id_part = r["ID"] if pd.notna(r["ID"]) else "Missing ID"
+        return f"{id_part} — {r['Beneficiary']}"
+
+    option_indices = filtered_df.index.tolist()
+    selected_idx = st.selectbox(
         "Select an MSME to inspect:",
-        filtered_df["ID"].tolist(),
+        option_indices,
+        format_func=_option_label,
         key="msme_select",
     )
-    row = filtered_df[filtered_df["ID"] == selected_id].iloc[0]
+    row = filtered_df.loc[selected_idx]
+
+    if pd.isna(row["ID"]):
+        st.warning("This record has no ID in Supabase — displaying by row position only.")
 
     d1, d2 = st.columns(2)
     with d1:
         prob = row["Completion Probability"]
         if pd.isna(prob):
-            st.error(f" This record could not be scored: {row['_prediction_errors']}")
+            st.error(f"This record could not be scored: {row['_prediction_errors']}")
         else:
             prob_not = row["Non-Completion Probability"]
             pred_class = row["Predicted Class"]
-            tier_label, tier_cls = risk_tier(prob)
+            tier_code, tier_cls = risk_tier(prob)
+            tier_label = RISK_LABELS[tier_code]
             color = tier_color(prob)
             st.markdown(f"""
             <div class="metric-card">
@@ -864,29 +1037,27 @@ else:
                 <div class="metric-sub">Probability of Non-Completion: {prob_not*100:.1f}%
                     &nbsp;·&nbsp; Predicted Class: <strong>{pred_class}</strong>
                 </div>
-                <div class="metric-sub">Risk Tier:
+                <div class="metric-sub">Monitoring Priority:
                     <span class="badge {tier_cls}">{tier_label}</span>
                 </div>
             </div>""", unsafe_allow_html=True)
 
             if row["_prediction_warnings"]:
-                st.warning(f" {row['_prediction_warnings']}")
+                st.warning(f"{row['_prediction_warnings']}")
 
-            if tier_label == "Low":
-                st.success(f" {get_recommendation(tier_label)}")
-            elif tier_label == "Medium":
-                st.warning(f" {get_recommendation(tier_label)}")
-            else:
-                st.error(f" {get_recommendation(tier_label)}")
+            rec = get_detailed_recommendation(prob, tier_code, row)
+            box = st.success if tier_code == "Low" else (st.warning if tier_code == "Medium" else st.error)
+            icon = "✅" if tier_code == "Low" else ("⚠️" if tier_code == "Medium" else "🔴")
+            action_list = "\n".join(f"- {a}" for a in rec["actions"])
+            box(f"{icon} **{rec['headline']}**\n\n{action_list}")
 
     with d2:
         st.markdown("**Profile**")
-        profile_fields = ["Beneficiary", "Province", "Sector", "Type of Ownership",
-                           "Size of Enterprise", "Project Cost", "Has_Prior_Funding", "Status"]
         profile_data = {
-            "Field": ["Beneficiary", "Province", "Sector", "Type of Ownership",
+            "Field": ["ID", "Beneficiary", "Province", "Sector", "Type of Ownership",
                       "Size of Enterprise", "Project Cost", "Has Prior Funding", "Status"],
             "Value": [
+                row["ID"] if pd.notna(row["ID"]) else "Missing ID",
                 row.get("Beneficiary"), row.get("Province"), row.get("Sector"),
                 row.get("Type of Ownership"), row.get("Size of Enterprise"),
                 f"₱{row['Project Cost']:,.0f}" if pd.notna(row.get("Project Cost")) else "—",
